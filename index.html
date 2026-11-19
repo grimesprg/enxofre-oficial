@@ -234,12 +234,14 @@
   <div class="drawer-body" id="drawerBody"></div>
 </aside>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <!-- Login -->
 <div class="modal" id="loginModal">
   <form class="box" id="loginForm">
     <h3>Painel administrativo</h3>
-    <label class="f"><span>Senha</span><input type="password" id="loginPass" autocomplete="current-password"></label>
+    <label class="f"><span>E-mail</span><input type="email" id="loginEmail" autocomplete="username" required></label>
+    <label class="f"><span>Senha</span><input type="password" id="loginPass" autocomplete="current-password" required></label>
     <div class="err" id="loginErr"></div>
     <div class="bar">
       <button class="btn btn-primary" type="submit">Entrar</button>
@@ -263,7 +265,12 @@
 
 <script>
 /* ============ DADOS PADRÃO (edite aqui se quiser mudar o ponto de partida) ============ */
-const DEFAULT_PASSWORD = 'enxofre123';
+// Supabase: chave pública (publishable). Nunca coloque uma secret/service_role no HTML.
+const SUPABASE_URL = 'https://lifuedphkopcdwujfrbe.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_W2sOc8EKYNRvI2aLoU-Tig_tLMzRwRy';
+const ADMIN_UID = 'f650b0d2-3d08-4537-974a-cc1855997e04';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+let authSession = null;
 
 function hash(s){let h1=0xdeadbeef,h2=0x41c6ce57;for(let i=0;i<s.length;i++){const c=s.charCodeAt(i);h1=Math.imul(h1^c,2654435761);h2=Math.imul(h2^c,1597334677);}
   h1=Math.imul(h1^(h1>>>16),2246822507)^Math.imul(h2^(h2>>>13),3266489909);
@@ -333,7 +340,36 @@ function load() {
   return base;
 }
 let D = load();
-function save() { try { localStorage.setItem(KEY, JSON.stringify(D)); } catch (e) {} }
+let saveTimer = null;
+async function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(D)); } catch (e) {}
+  if (!authSession || authSession.user.id !== ADMIN_UID) return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    const { error } = await supabaseClient.from('enxofre_loja').upsert({ id: 1, dados: D, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    if (error) console.error('Erro ao sincronizar loja:', error.message);
+  }, 500);
+}
+async function loadCloud() {
+  const localData = clone(D);
+  const { data, error } = await supabaseClient.from('enxofre_loja').select('dados').eq('id', 1).maybeSingle();
+  if (error) { console.error('Erro ao carregar loja:', error.message); return false; }
+  if (data && data.dados && typeof data.dados === 'object') {
+    const cloud = data.dados;
+    // Mantém conteúdo local quando o registro da nuvem estiver vazio/incompleto.
+    const keepArray = (key) => Array.isArray(cloud[key]) && cloud[key].length
+      ? cloud[key] : (Array.isArray(localData[key]) && localData[key].length ? localData[key] : (Array.isArray(DEFAULT[key]) ? DEFAULT[key] : []));
+    D = {
+      ...clone(DEFAULT), ...localData, ...cloud,
+      site: { ...DEFAULT.site, ...(localData.site || {}), ...(cloud.site || {}) },
+      stats: keepArray('stats'), categories: keepArray('categories'), kits: keepArray('kits'),
+      history: keepArray('history'), sales: keepArray('sales')
+    };
+    try { localStorage.setItem(KEY, JSON.stringify(D)); } catch (_) {}
+    return true;
+  }
+  return false;
+}
 
 /* ============ SITE PÚBLICO ============ */
 function renderSite() {
@@ -358,26 +394,39 @@ function renderSite() {
   $('#statsGrid').innerHTML = D.stats.map(x => `<div class="stat"><strong>${esc(x.value)}</strong><span>${esc(x.label)}</span></div>`).join('');
   $('#catsGrid').innerHTML = D.categories.map(c => `<div class="cat"><div class="icon">${esc(c.icon)}</div><h3>${esc(c.name)}</h3><p>${esc(c.desc)}</p></div>`).join('');
   const buy = s.buyLink || s.discord || '#';
-  $('#kitsGrid').innerHTML = D.kits.map(k => `<div class="product">${k.image ? `<img src="${esc(k.image)}" alt="${esc(k.name)}" style="width:100%;height:140px;object-fit:cover;border-radius:10px">` : ''}${k.tag ? `<span class="tag">${esc(k.tag)}</span>` : ''}<h3>${esc(k.name)}</h3><p>${esc(k.desc)}</p><div class="pricerow"><strong class="price">${money(k.price)}</strong>${pixBadge()}</div><button class="btn btn-primary" data-add="${esc(k.id)}">🛒 Adicionar ao carrinho</button></div>`).join('')
+  $('#kitsGrid').innerHTML = D.kits.map(k => `<div class="product">${k.tag ? `<span class="tag">${esc(k.tag)}</span>` : ''}<h3>${esc(k.name)}</h3><p>${esc(k.desc)}</p><div class="pricerow"><strong class="price">${money(k.price)}</strong>${pixBadge()}</div><button class="btn btn-primary" data-add="${esc(k.id)}">🛒 Adicionar ao carrinho</button></div>`).join('')
     || '<p class="muted">Nenhum kit cadastrado.</p>';
   renderTop(); updateCart();
 }
 
-/* ============ LOGIN ============ */
-const isAdmin = () => sessionStorage.getItem('enx_adm') === '1';
-function openLogin() { $('#loginErr').textContent = ''; $('#loginPass').value = ''; $('#loginModal').classList.add('open'); setTimeout(() => $('#loginPass').focus(), 50); }
+/* ============ LOGIN SUPABASE ============ */
+const isAdmin = () => !!authSession && authSession.user.id === ADMIN_UID;
+function openLogin() { $('#loginErr').textContent = ''; $('#loginEmail').value = ''; $('#loginPass').value = ''; $('#loginModal').classList.add('open'); setTimeout(() => $('#loginEmail').focus(), 50); }
 function closeLogin() { $('#loginModal').classList.remove('open'); }
 $('#adminLink').addEventListener('click', () => isAdmin() ? openAdmin() : openLogin());
 $('#loginCancel').addEventListener('click', closeLogin);
-$('#loginForm').addEventListener('submit', e => {
+$('#loginForm').addEventListener('submit', async e => {
   e.preventDefault();
-  if (hash($('#loginPass').value) === D.passHash) { sessionStorage.setItem('enx_adm', '1'); closeLogin(); openAdmin(); }
-  else $('#loginErr').textContent = 'Senha incorreta.';
+  const email = $('#loginEmail').value.trim();
+  const password = $('#loginPass').value;
+  $('#loginErr').textContent = 'Entrando...';
+  const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+  if (error) { $('#loginErr').textContent = 'Não foi possível entrar. Confira e-mail e senha.'; return; }
+  authSession = data.session;
+  if (!isAdmin()) { await supabaseClient.auth.signOut(); authSession = null; $('#loginErr').textContent = 'Esta conta não tem permissão de administrador.'; return; }
+  const hasCloudData = await loadCloud();
+  if (!hasCloudData) await save(); // migra os dados locais existentes na primeira entrada
+  renderSite(); closeLogin(); openAdmin();
 });
 $('#admClose').addEventListener('click', () => $('#adm').classList.remove('open'));
-$('#admLogout').addEventListener('click', () => { sessionStorage.removeItem('enx_adm'); $('#adm').classList.remove('open'); });
-if (location.hash === '#admin') { isAdmin() ? setTimeout(openAdmin, 0) : openLogin(); }
-
+$('#admLogout').addEventListener('click', async () => { await supabaseClient.auth.signOut(); authSession = null; $('#adm').classList.remove('open'); });
+supabaseClient.auth.getSession().then(async ({ data }) => {
+  authSession = data.session;
+  const hasCloudData = await loadCloud();
+  if (isAdmin() && !hasCloudData) await save();
+  renderSite();
+  if (location.hash === '#admin' && isAdmin()) openAdmin();
+});
 /* ============ PAINEL ============ */
 function h(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
@@ -449,32 +498,16 @@ function tabCats() {
     () => ({ icon: '⭐', name: 'Nova categoria', desc: 'Descrição' }), 'Adicionar categoria');
 }
 function tabKits() {
-  const w = listTab('Kits da loja', D.kits, (k, i) => {
-    const fi = h('input', { type: 'file', accept: 'image/*', style: 'display:none', onchange: () => {
-      const f = fi.files[0]; if (!f) return;
-      const r = new FileReader();
-      r.onload = () => { k.image = r.result; save(); renderSite(); drawAdmin(); };
-      r.readAsDataURL(f);
-    }});
-    const photoBox = h('div', { class: 'f' },
-      h('span', {}, 'Foto do kit'),
-      h('div', { class: 'bar' },
-        h('button', { type: 'button', class: 'btn btn-ghost btn-sm', onclick: () => fi.click() }, k.image ? 'Trocar foto' : 'Enviar foto'),
-        k.image ? h('button', { type: 'button', class: 'btn btn-danger btn-sm', onclick: () => { delete k.image; save(); renderSite(); drawAdmin(); } }, 'Remover foto') : null,
-        fi
-      ),
-      k.image ? h('img', { src: k.image, alt: '', style: 'width:80px;height:60px;object-fit:cover;border-radius:8px;margin-top:4px' }) : null
-    );
-    return h('div', { class: 'card' },
+  const w = listTab('Kits da loja', D.kits, (k, i) =>
+    h('div', { class: 'card' },
       h('div', { class: 'grid2' }, inp('Nome', k, 'name'), inp('Preço (R$)', k, 'price', { num: true })),
-      h('div', { class: 'grid2' }, inp('Etiqueta', k, 'tag', { hint: 'Ex.: Lendário, Farm, Combate.' }), photoBox),
+      h('div', { class: 'grid2' }, inp('Etiqueta', k, 'tag', { hint: 'Ex.: Lendário, Farm, Combate.' }), h('div')),
       inp('Descrição', k, 'desc', { textarea: true, rows: 2 }),
       inp('Comandos de entrega (um por linha)', k, 'commands', { textarea: true, rows: 5, hint: 'Use {player} onde vai o nome do jogador. Ex.: give "{player}" diamond_sword 1' }),
       h('div', { class: 'bar' },
         h('button', { class: 'btn btn-ghost btn-sm', disabled: i === 0 ? 'true' : null, onclick: () => { [D.kits[i-1], D.kits[i]] = [D.kits[i], D.kits[i-1]]; save(); renderSite(); drawAdmin(); } }, '↑'),
         h('button', { class: 'btn btn-ghost btn-sm', disabled: i === D.kits.length - 1 ? 'true' : null, onclick: () => { [D.kits[i+1], D.kits[i]] = [D.kits[i], D.kits[i+1]]; save(); renderSite(); drawAdmin(); } }, '↓'),
-        delBtn(D.kits, i)));
-  },
+        delBtn(D.kits, i))),
     () => ({ id: uid(), tag: '', name: 'Novo kit', price: 0, desc: '', commands: 'give "{player}" diamond 1' }), 'Adicionar kit');
   return w;
 }
@@ -562,7 +595,7 @@ function tabConta() {
   } });
   return h('div', { class: 'panel', style: 'padding:0' },
     h('h3', {}, 'Backup'),
-    h('p', { class: 'muted' }, 'As alterações ficam salvas neste navegador. Exporte um backup para guardar ou levar para outro aparelho.'),
+    h('p', { class: 'muted' }, 'As alterações são sincronizadas pelo Supabase quando você entra como administrador. Exporte um backup extra para segurança.'),
     h('div', { class: 'bar' },
       h('button', { class: 'btn btn-primary', onclick: () => {
         const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(D, null, 2)], { type: 'application/json' })), download: 'enxofre-backup.json' });
